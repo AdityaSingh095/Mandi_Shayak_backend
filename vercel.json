@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python",
+      "config": { "maxLambdaSize": "50mb" }
+    }
+  ],
+  "routes": [
+    { "src": "/api/(.*)", "dest": "api/index.py" },
+    { "src": "/(.*)", "dest": "api/index.py" }
+  ],
+  "crons": [
+    { "path": "/api/cron/reevaluate", "schedule": "30 21 * * *" }
+  ],
+  "env": {
+    "DATABASE_URL": "@database-url",
+    "DATA_GOV_IN_API_KEY": "@data-gov-in-api-key",
+    "ENVIRONMENT": "production",
+    "CRON_SECRET": "@cron-secret"
+  }
+}
