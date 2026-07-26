@@ -51,11 +51,11 @@ async def _fetch_from_agmarknet(
     if settings.force_demo_data:
         raise ValueError("FORCE_DEMO_DATA=true — skipping live API")
 
-    async def _query_api(comm: str) -> list[dict]:
+    async def _query_api(comm: str, use_district: bool = True) -> list[dict]:
         recs = []
         off = 0
         limit = 500
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             while True:
                 params = {
                     "api-key": api_key,
@@ -63,9 +63,11 @@ async def _fetch_from_agmarknet(
                     "limit": limit,
                     "offset": off,
                     "filters[state]": state,
-                    "filters[district]": district,
                     "filters[commodity]": comm,
                 }
+                if use_district and district:
+                    params["filters[district]"] = district
+
                 resp = await client.get(AGMARKNET_URL, params=params)
                 resp.raise_for_status()
                 data = resp.json()
@@ -77,15 +79,24 @@ async def _fetch_from_agmarknet(
                     break
         return recs
 
-    all_records = await _query_api(commodity)
-
-    # Fallback to primary crop word (e.g. "Wheat" instead of "Wheat Sharbati") if no records returned
+    all_records = []
     base_comm = commodity.split()[0]
-    if not all_records and base_comm != commodity:
-        try:
-            all_records = await _query_api(base_comm)
-        except Exception:
-            pass
+
+    # Flexible multi-tier query fallback:
+    # 1. Exact crop + district filter
+    # 2. Exact crop + state-wide filter
+    # 3. Base crop (e.g. Wheat) + district filter
+    # 4. Base crop + state-wide filter
+    for comm_query in list(dict.fromkeys([commodity, base_comm])):
+        for dist_filter in [True, False]:
+            try:
+                all_records = await _query_api(comm_query, use_district=dist_filter)
+                if all_records:
+                    break
+            except Exception as ex:
+                logger.warning(f"Agmarknet query ({comm_query}, dist={dist_filter}) warning: {ex}")
+        if all_records:
+            break
 
     # Normalize field names from API response
     normalized = []
