@@ -83,21 +83,22 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 from app.routers import health, intake, analyze, history, mandis, crops, profiles, cron, multimodal, simulator, report, warehouses, planner, vault
 
-# ── Routers ───────────────────────────────────────────────────────────────────
-app.include_router(health.router,        prefix="/api")
-app.include_router(intake.router,        prefix="/api")
-app.include_router(analyze.router,       prefix="/api")
-app.include_router(history.router,       prefix="/api")
-app.include_router(mandis.mandis_router, prefix="/api")
-app.include_router(crops.router,         prefix="/api")
-app.include_router(profiles.router,      prefix="/api")
-app.include_router(cron.router,          prefix="/api")
-app.include_router(multimodal.router,    prefix="/api")
-app.include_router(simulator.router,     prefix="/api")
-app.include_router(report.router,        prefix="/api")
-app.include_router(warehouses.router,    prefix="/api")
-app.include_router(planner.router,       prefix="/api")
-app.include_router(vault.router,         prefix="/api")
+# ── Routers (Mounted with /api and root fallbacks to guarantee zero 404s on Vercel) ──
+for pfx in ["/api", ""]:
+    app.include_router(health.router,        prefix=pfx)
+    app.include_router(intake.router,        prefix=pfx)
+    app.include_router(analyze.router,       prefix=pfx)
+    app.include_router(history.router,       prefix=pfx)
+    app.include_router(mandis.mandis_router, prefix=pfx)
+    app.include_router(crops.router,         prefix=pfx)
+    app.include_router(profiles.router,      prefix=pfx)
+    app.include_router(cron.router,          prefix=pfx)
+    app.include_router(multimodal.router,    prefix=pfx)
+    app.include_router(simulator.router,     prefix=pfx)
+    app.include_router(report.router,        prefix=pfx)
+    app.include_router(warehouses.router,    prefix=pfx)
+    app.include_router(planner.router,       prefix=pfx)
+    app.include_router(vault.router,         prefix=pfx)
 
 
 @app.get("/")
