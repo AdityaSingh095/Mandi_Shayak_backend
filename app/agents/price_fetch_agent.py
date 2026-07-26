@@ -51,30 +51,41 @@ async def _fetch_from_agmarknet(
     if settings.force_demo_data:
         raise ValueError("FORCE_DEMO_DATA=true — skipping live API")
 
-    all_records = []
-    offset = 0
-    limit = 500
+    async def _query_api(comm: str) -> list[dict]:
+        recs = []
+        off = 0
+        limit = 500
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            while True:
+                params = {
+                    "api-key": api_key,
+                    "format": "json",
+                    "limit": limit,
+                    "offset": off,
+                    "filters[state]": state,
+                    "filters[district]": district,
+                    "filters[commodity]": comm,
+                }
+                resp = await client.get(AGMARKNET_URL, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+                records = data.get("records", [])
+                recs.extend(records)
+                total = int(data.get("total", 0))
+                off += limit
+                if off >= total or not records:
+                    break
+        return recs
 
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        while True:
-            params = {
-                "api-key": api_key,
-                "format": "json",
-                "limit": limit,
-                "offset": offset,
-                "filters[state]": state,
-                "filters[district]": district,
-                "filters[commodity]": commodity,
-            }
-            resp = await client.get(AGMARKNET_URL, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            records = data.get("records", [])
-            all_records.extend(records)
-            total = int(data.get("total", 0))
-            offset += limit
-            if offset >= total or not records:
-                break
+    all_records = await _query_api(commodity)
+
+    # Fallback to primary crop word (e.g. "Wheat" instead of "Wheat Sharbati") if no records returned
+    base_comm = commodity.split()[0]
+    if not all_records and base_comm != commodity:
+        try:
+            all_records = await _query_api(base_comm)
+        except Exception:
+            pass
 
     # Normalize field names from API response
     normalized = []
@@ -175,6 +186,9 @@ async def _fetch_mandi_prices(
     freshness_hours = cfg_float("cache.price_freshness_hours", 6.0)
     stale_hours = cfg_float("cache.stale_threshold_hours", 48.0)
 
+    hours_old = 999
+    latest_fetch = None
+
     # ── Priority 1: DB Cache Check First (Instant 0ms response) ───────────
     cached = await _get_cached_prices(db, mandi.id, canonical_crop_id, days_back)
     if cached:
@@ -182,7 +196,6 @@ async def _fetch_mandi_prices(
             (r.get("fetched_at") for r in cached if r.get("fetched_at")),
             default=None
         )
-        hours_old = 999
         if latest_fetch:
             diff = datetime.utcnow() - (
                 latest_fetch if isinstance(latest_fetch, datetime) else datetime.utcnow()
@@ -223,13 +236,14 @@ async def _fetch_mandi_prices(
     except Exception as e:
         logger.warning(f"API fetch failed for {mandi.name}: {e}")
 
-        tier = "CACHE" if hours_old <= stale_hours else "CACHE_STALE"
-        logger.info(f"CACHE ({tier}): {mandi.name} — {len(cached)} records")
-        return PriceDataPacket(
-            mandi_id=mandi.id, mandi_name=mandi.name,
-            records=cached, data_tier=tier,
-            last_updated=latest_fetch,
-        )
+        if cached:
+            tier = "CACHE" if hours_old <= stale_hours else "CACHE_STALE"
+            logger.info(f"CACHE ({tier}): {mandi.name} — {len(cached)} records")
+            return PriceDataPacket(
+                mandi_id=mandi.id, mandi_name=mandi.name,
+                records=cached, data_tier=tier,
+                last_updated=latest_fetch,
+            )
 
     # ── Priority 3: Demo data ──────────────────────────────────────────────
     logger.warning(f"DEMO DATA fallback for {mandi.name} / {crop_name}")

@@ -91,7 +91,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 
-from app.routers import health, intake, analyze, history, mandis, crops, profiles, cron, multimodal, simulator, report, warehouses, planner
+from app.routers import health, intake, analyze, history, mandis, crops, profiles, cron, multimodal, simulator, report, warehouses, planner, vault
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(health.router,        prefix="/api")
@@ -107,6 +107,7 @@ app.include_router(simulator.router,     prefix="/api")
 app.include_router(report.router,        prefix="/api")
 app.include_router(warehouses.router,    prefix="/api")
 app.include_router(planner.router,       prefix="/api")
+app.include_router(vault.router,         prefix="/api")
 
 
 @app.get("/")

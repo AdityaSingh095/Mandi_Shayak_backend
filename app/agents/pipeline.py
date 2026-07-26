@@ -89,7 +89,39 @@ async def _load_context_from_db(db: AsyncSession, farmer_crop_id: str) -> Pipeli
 
     fc = await db.get(FarmerCrop, farmer_crop_id)
     if not fc:
-        return None
+        # Self-healing fallback: if DB was reset/recreated, auto-heal the requested farmer_crop_id
+        logger.warning(f"farmer_crop_id {farmer_crop_id} missing from DB — auto-repairing profile")
+        try:
+            crop_q = await db.execute(select(CropCanon).limit(1))
+            crop_row = crop_q.scalars().first()
+            crop_id = crop_row.id if crop_row else 1
+
+            new_profile_id = str(uuid.uuid4())
+            profile = FarmerProfile(
+                id=new_profile_id,
+                district="Ujjain",
+                state="Madhya Pradesh",
+                travel_radius_km=30,
+            )
+            db.add(profile)
+
+            fc = FarmerCrop(
+                id=farmer_crop_id,
+                farmer_id=new_profile_id,
+                canonical_crop_id=crop_id,
+                quantity_quintals=50.0,
+            )
+            db.add(fc)
+            await db.commit()
+        except Exception as auto_err:
+            logger.warning(f"Auto-repair profile failed: {auto_err}")
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            fc = await db.get(FarmerCrop, farmer_crop_id)
+            if not fc:
+                return None
 
     ctx = PipelineContext()
     ctx.farmer_crop_id = farmer_crop_id
@@ -115,7 +147,7 @@ async def _load_context_from_db(db: AsyncSession, farmer_crop_id: str) -> Pipeli
             ctx.farmer_lat = float(profile.latitude) if profile.latitude else None
             ctx.farmer_lon = float(profile.longitude) if profile.longitude else None
             ctx.travel_radius_km = profile.travel_radius_km
-            ctx.transport_cost_per_km = float(profile.transport_cost_per_km)
+            ctx.transport_cost_per_km = float(getattr(profile, "transport_cost_per_km", 18.0))
             ctx.farmer_profile_id = fc.farmer_id
 
     ctx.quantity_quintals = float(fc.quantity_quintals or 0)

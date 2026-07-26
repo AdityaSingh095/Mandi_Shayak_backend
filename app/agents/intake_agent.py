@@ -101,26 +101,24 @@ async def run_intake_agent(
     ctx.mandis_in_radius = sorted(radius_mandis, key=lambda x: x.distance_km or 0)
 
     # ── Step 4: Create FarmerProfile + FarmerCrop rows ────────────────────
-    farmer_profile = None
-    if request.save_profile and request.phone_or_contact:
-        farmer_profile = FarmerProfile(
-            id=str(uuid.uuid4()),
-            phone_or_contact=request.phone_or_contact,
-            district=ctx.district,
-            state=ctx.state,
-            latitude=ctx.farmer_lat,
-            longitude=ctx.farmer_lon,
-            travel_radius_km=ctx.travel_radius_km,
-            transport_cost_per_km=ctx.transport_cost_per_km,
-            notification_channel=request.notification_channel,
-            consent_given=False,  # Must be explicitly confirmed via /profile/save
-        )
-        db.add(farmer_profile)
-        ctx.farmer_profile_id = farmer_profile.id
+    prof_id = str(uuid.uuid4())
+    farmer_profile = FarmerProfile(
+        id=prof_id,
+        phone_or_contact=request.phone_or_contact if request.save_profile else None,
+        district=ctx.district,
+        state=ctx.state,
+        latitude=ctx.farmer_lat,
+        longitude=ctx.farmer_lon,
+        travel_radius_km=ctx.travel_radius_km,
+        notification_channel=request.notification_channel if request.save_profile else "none",
+        consent_given=request.save_profile,
+    )
+    db.add(farmer_profile)
+    ctx.farmer_profile_id = prof_id
 
     farmer_crop = FarmerCrop(
         id=ctx.farmer_crop_id,
-        farmer_id=farmer_profile.id if farmer_profile else None,
+        farmer_id=prof_id,
         canonical_crop_id=1,  # placeholder; updated after normalization
         home_mandi_id=ctx.home_mandi_id,
         quantity_quintals=ctx.quantity_quintals,

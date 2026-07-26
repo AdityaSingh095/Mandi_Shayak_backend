@@ -31,6 +31,10 @@ def _build_engine():
             max_overflow=0,
             pool_recycle=300,
             pool_timeout=10,
+            connect_args={
+                "statement_cache_size": 0,
+                "prepared_statement_cache_size": 0,
+            },
             echo=False,
         )
 

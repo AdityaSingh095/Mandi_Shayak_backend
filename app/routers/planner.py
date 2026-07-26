@@ -51,6 +51,38 @@ async def plan_multi_crop(
             transport_cost_per_km=request.transport_cost_per_km,
             max_travel_radius_km=request.max_travel_radius_km,
         )
+
+        # ── Fire-and-forget: record a compact vault snapshot per crop ─────────
+        try:
+            import asyncio
+            from app.routers.vault import save_snapshot_in_background
+
+            async def _save_planner_snaps():
+                for crop_result in result.get("crop_plans", []):
+                    try:
+                        snap_payload = {
+                            "state": request.state,
+                            "district": request.district,
+                            "crop_name": crop_result.get("crop_name", "Unknown"),
+                            "recommended_action": crop_result.get("action", "SELL"),
+                            "target_mandi_name": crop_result.get("target_mandi", {}).get("mandi_name"),
+                            "target_mandi_distance_km": crop_result.get("target_mandi", {}).get("distance_km"),
+                            "modal_price_at_run": crop_result.get("target_mandi", {}).get("estimated_modal_price"),
+                            "projected_profit_per_qtl": crop_result.get("net_profit_per_qtl"),
+                            "projected_hold_days": crop_result.get("hold_recommendation", {}).get("hold_days"),
+                            "quantity_quintals": crop_result.get("quantity_quintals"),
+                            "data_tier": result.get("data_tier", "LIVE"),
+                            "source_type": "planner",
+                            "metrics": {"confidence": crop_result.get("confidence")},
+                        }
+                        await save_snapshot_in_background(snap_payload)
+                    except Exception:
+                        pass  # per-crop failure is non-fatal
+
+            asyncio.create_task(_save_planner_snaps())
+        except Exception:
+            pass  # Snapshot recording is non-critical
+
         return result
     except Exception as e:
         raise HTTPException(500, f"Multi-crop planner error: {str(e)}")

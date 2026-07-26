@@ -30,19 +30,27 @@ class Settings(BaseSettings):
 
     @property
     def is_sqlite(self) -> bool:
-        if self.use_local_db:
-            return True
-        return "sqlite" in self.database_url
+        # Only use Postgres when environment == 'production' and postgres is in database_url
+        if self.environment.lower() == "production" and "postgres" in self.database_url.lower():
+            return False
+        if self.environment.lower() == "production" and not self.use_local_db:
+            return False
+        return True
 
     @property
     def effective_database_url(self) -> str:
-        if self.use_local_db:
-            return "sqlite+aiosqlite:///./mandi_sahayak.db"
-        return self.database_url
+        if not self.is_sqlite:
+            url = self.database_url
+            if url.startswith("postgresql://"):
+                url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            elif url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+            return url
+        return "sqlite+aiosqlite:///./mandi_sahayak.db"
 
     @property
     def is_production(self) -> bool:
-        return self.environment == "production"
+        return self.environment.lower() == "production"
 
 
 @lru_cache()

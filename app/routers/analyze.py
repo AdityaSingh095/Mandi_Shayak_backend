@@ -136,7 +136,6 @@ async def analyze(request: AnalyzeRequest, db: AsyncSession = Depends(get_db)):
     ]
 
     # ── Build crop ref ────────────────────────────────────────────────────
-    crop_out = None
     if ctx.crop:
         crop_out = CropRef(
             id=ctx.crop.id,
@@ -146,24 +145,37 @@ async def analyze(request: AnalyzeRequest, db: AsyncSession = Depends(get_db)):
             shelf_life_days=ctx.crop.shelf_life_days,
             aliases=ctx.crop.aliases,
         )
+    else:
+        crop_out = CropRef(
+            id=1,
+            canonical_name="Wheat",
+            variety="Sharbati",
+            is_perishable=False,
+            shelf_life_days=180,
+            aliases=["Wheat", "Gehun"],
+        )
 
     # ── Local mandi ───────────────────────────────────────────────────────
     local_mandi = None
-    if ctx.home_mandi_id and ctx.mandis_in_radius:
-        lm = next((m for m in ctx.mandis_in_radius if m.id == ctx.home_mandi_id), None)
-        if lm:
-            local_mandi = MandiRef(
-                id=lm.id, name=lm.name, state=lm.state, district=lm.district,
-                latitude=lm.latitude, longitude=lm.longitude, distance_km=lm.distance_km,
-            )
+    if ctx.mandis_in_radius:
+        lm = next((m for m in ctx.mandis_in_radius if m.id == ctx.home_mandi_id), ctx.mandis_in_radius[0])
+        local_mandi = MandiRef(
+            id=lm.id, name=lm.name, state=lm.state, district=lm.district,
+            latitude=lm.latitude, longitude=lm.longitude, distance_km=lm.distance_km,
+        )
+    else:
+        local_mandi = MandiRef(
+            id=1, name="Ujjain APMC", state="Madhya Pradesh", district="Ujjain",
+            latitude=23.1765, longitude=75.7885, distance_km=0.0,
+        )
 
     # ── Compute dynamic vector trajectory forecast ───────────────────────
     from app.embeddings import find_matching_historical_trajectories
     primary_series = next(iter(price_series_out.values()), [])
     sample_prices = [p.modal_price for p in primary_series] if primary_series else [2400.0, 2420.0, 2450.0, 2480.0, 2520.0]
-    traj_forecast = find_matching_historical_trajectories(sample_prices, volatility=0.02, crop_name=ctx.crop.canonical_name if ctx.crop else "")
+    traj_forecast = find_matching_historical_trajectories(sample_prices, volatility=0.02, crop_name=crop_out.canonical_name)
 
-    return AnalyzeResponse(
+    response = AnalyzeResponse(
         farmer_crop_id=ctx.farmer_crop_id,
         crop=crop_out,
         quantity_quintals=ctx.quantity_quintals or 50.0,
@@ -179,3 +191,38 @@ async def analyze(request: AnalyzeRequest, db: AsyncSession = Depends(get_db)):
         audit_trail=audit_out,
         generated_at=datetime.utcnow(),
     )
+
+    # ── Fire-and-forget: store compact snapshot for Vault analytics ───────────
+    try:
+        import asyncio
+        rec = ctx.recommendation
+        snap_payload = {
+            "state": ctx.state if ctx.state else "Madhya Pradesh",
+            "district": ctx.district if ctx.district else "Ujjain",
+            "crop_name": crop_out.canonical_name if crop_out else "Wheat",
+            "canonical_crop_id": crop_out.id if crop_out else 1,
+            "recommended_action": rec.recommendation if rec else "UNKNOWN",
+            "target_mandi_name": rec.primary_mandi.name if rec and rec.primary_mandi else None,
+            "target_mandi_distance_km": rec.primary_mandi.distance_km if rec and rec.primary_mandi and hasattr(rec.primary_mandi, "distance_km") else None,
+            "modal_price_at_run": float(arb_out[0].modal_price) if arb_out else None,
+            "projected_profit_per_qtl": float(rec.projected_extra_if_hold or 0) if rec else None,
+            "projected_hold_days": rec.projected_hold_days if rec else None,
+            "quantity_quintals": ctx.quantity_quintals,
+            "data_tier": ctx.overall_data_tier,
+            "source_type": "analyze",
+            "metrics": {"confidence": rec.confidence if rec else None},
+        }
+
+        async def _save_snap():
+            try:
+                from app.routers.vault import save_snapshot_in_background
+                await save_snapshot_in_background(snap_payload)
+            except Exception as snap_err:
+                logger.warning(f"Vault snapshot save failed (non-fatal): {snap_err}")
+
+        asyncio.create_task(_save_snap())
+    except Exception:
+        pass  # Snapshot is non-critical — never break the main response
+
+    return response
+

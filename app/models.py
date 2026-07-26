@@ -1,12 +1,8 @@
 """
-app/models.py
-─────────────────────────────────────────────────────────
-SQLAlchemy ORM models for all 7 tables.
-Handles SQLite/Postgres type differences:
-  - Vector(384) is only registered on Postgres; SQLite uses JSON text fallback
-  - UUID is TEXT on SQLite, proper UUID on Postgres
+app/models.py — PlanSnapshot added at the bottom.
+Zero-bloat: unique (state, district, canonical_crop_id, run_date).
+30-day pruning handled in the vault router on every write.
 """
-
 import uuid
 from datetime import datetime, date
 from typing import Optional, List
@@ -158,13 +154,9 @@ class FarmerProfile(Base):
     state: Mapped[str] = mapped_column(Text, nullable=False)
     latitude: Mapped[Optional[float]] = mapped_column(Numeric(9, 6))
     longitude: Mapped[Optional[float]] = mapped_column(Numeric(9, 6))
-    travel_radius_km: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
-    transport_cost_per_km: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, default=18.0)
+    travel_radius_km: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
     notification_channel: Mapped[str] = mapped_column(Text, nullable=False, default="none")
     consent_given: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    consent_given_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    pending_notification: Mapped[Optional[str]] = mapped_column(Text)  # JSON
-    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -175,9 +167,11 @@ class FarmerCrop(Base):
     __tablename__ = "farmer_crops"
 
     id: Mapped[str] = _uuid_col(primary_key=True, nullable=False)
-    farmer_id: Mapped[Optional[str]] = mapped_column(
+    farmer_id: Mapped[str] = mapped_column(
         String(36) if get_settings().is_sqlite else PG_UUID(as_uuid=True),
         ForeignKey("farmer_profiles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     canonical_crop_id: Mapped[int] = mapped_column(Integer, ForeignKey("crop_canon.id", ondelete="RESTRICT"), nullable=False)
     home_mandi_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("mandis.id", ondelete="SET NULL"))
@@ -228,3 +222,49 @@ class SystemConfig(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_by: Mapped[Optional[str]] = mapped_column(Text)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PlanSnapshot — Zero-bloat historical advisory runs storage
+# Unique per (state, district, canonical_crop_id, run_date): 1 row per crop/district/day
+# 30-day rolling window pruned automatically on every write in vault router.
+# Estimated max storage: ~50 rows total × ~200 bytes = ~10 KB on Supabase free tier.
+# ─────────────────────────────────────────────────────────────────────────────
+class PlanSnapshot(Base):
+    __tablename__ = "plan_snapshots"
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+
+    # What crop/location/day this snapshot is for
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    district: Mapped[str] = mapped_column(Text, nullable=False)
+    crop_name: Mapped[str] = mapped_column(Text, nullable=False)
+    canonical_crop_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("crop_canon.id", ondelete="SET NULL"))
+    run_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+
+    # Advisory outcome (what the system recommended)
+    recommended_action: Mapped[str] = mapped_column(Text, nullable=False)  # SELL / HOLD / WAIT
+    target_mandi_name: Mapped[Optional[str]] = mapped_column(Text)
+    target_mandi_distance_km: Mapped[Optional[float]] = mapped_column(Numeric(7, 1))
+    modal_price_at_run: Mapped[Optional[float]] = mapped_column(Numeric(10, 2))
+    projected_profit_per_qtl: Mapped[Optional[float]] = mapped_column(Numeric(10, 2))
+    projected_hold_days: Mapped[Optional[int]] = mapped_column(Integer)
+    quantity_quintals: Mapped[Optional[float]] = mapped_column(Numeric(8, 2))
+
+    # Data quality
+    data_tier: Mapped[str] = mapped_column(Text, nullable=False, default="LIVE")  # LIVE / CACHE_STALE / DEMO
+
+    # Source type: "analyze" (single-crop) or "planner" (multi-crop)
+    source_type: Mapped[str] = mapped_column(Text, nullable=False, default="analyze")
+
+    # Compact packed metrics JSON (trajectory match, confidence, etc.)
+    metrics_json: Mapped[Optional[str]] = mapped_column(Text)  # JSON string
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        # One row per crop/district/day — zero database bloat
+        UniqueConstraint("state", "district", "crop_name", "run_date", name="uq_plan_snapshot_daily"),
+        Index("ix_snapshot_run_date", "run_date"),
+        Index("ix_snapshot_crop_district", "crop_name", "district"),
+    )
