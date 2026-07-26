@@ -15,28 +15,20 @@ def _build_engine():
     settings = get_settings()
     url = settings.effective_database_url
 
-    if settings.is_sqlite:
-        # SQLite local database mode
-        return create_async_engine(
-            url,
-            connect_args={"check_same_thread": False},
-            echo=False,
-        )
-    else:
-        # PostgreSQL / Supabase connection pooler mode (Port 6543)
-        return create_async_engine(
-            url,
-            pool_pre_ping=True,
-            pool_size=5,
-            max_overflow=0,
-            pool_recycle=300,
-            pool_timeout=10,
-            connect_args={
-                "statement_cache_size": 0,
-                "prepared_statement_cache_size": 0,
-            },
-            echo=False,
-        )
+    # PostgreSQL / Supabase connection pooler mode (Port 6543)
+    return create_async_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=0,
+        pool_recycle=300,
+        pool_timeout=10,
+        connect_args={
+            "statement_cache_size": 0,
+            "prepared_statement_cache_size": 0,
+        },
+        echo=False,
+    )
 
 
 engine = _build_engine()
@@ -63,11 +55,10 @@ async def get_db():
 
 async def init_db():
     """
-    Create all tables for SQLite / PostgreSQL.
+    Create all tables and pgvector extension for PostgreSQL.
     """
     async with engine.begin() as conn:
-        if not get_settings().is_sqlite:
-            await conn.execute(__import__("sqlalchemy").text("CREATE EXTENSION IF NOT EXISTS vector"))
+        await conn.execute(__import__("sqlalchemy").text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
     
     # Run inline seed check if CropCanon is empty (non-recursive)
