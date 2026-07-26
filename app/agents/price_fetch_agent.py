@@ -277,8 +277,8 @@ async def _fetch_mandi_prices(
 
 async def run_price_fetch_agent(db: AsyncSession, ctx: PipelineContext) -> PipelineContext:
     """
-    Fetches prices for all mandis in ctx.mandis_in_radius concurrently.
-    Populates ctx.price_data and ctx.overall_data_tier.
+    Fetches prices for all mandis in ctx.mandis_in_radius.
+    Uses 1 state-level batch query for fast ~1s response, falling back to demo pricing if API is unavailable.
     """
     if not ctx.crop:
         ctx.append_audit(
@@ -288,30 +288,66 @@ async def run_price_fetch_agent(db: AsyncSession, ctx: PipelineContext) -> Pipel
         return ctx
 
     days_back = 30
+    crop_name = ctx.crop.canonical_name
 
-    # Concurrent fetch for all mandis
-    tasks = [
-        _fetch_mandi_prices(db, mandi, ctx, days_back)
-        for mandi in ctx.mandis_in_radius
-    ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    # ── Step 1: Pre-fetch state-wide live Agmarknet batch (1 single fast HTTP call) ──
+    state_records = []
+    try:
+        state_records = await _fetch_from_agmarknet(
+            state=ctx.state,
+            district=None, # State-wide query to get all mandis in 1 call
+            commodity=crop_name,
+            days_back=days_back,
+        )
+    except Exception as e:
+        logger.warning(f"State-wide batch fetch warning for {ctx.state} / {crop_name}: {e}")
 
-    for mandi, result in zip(ctx.mandis_in_radius, results):
-        if isinstance(result, Exception):
-            logger.error(f"Price fetch exception for {mandi.name}: {result}")
-            # Create empty DEMO fallback
-            demo = get_demo_prices_for_mandi_crop(mandi.name, ctx.crop.canonical_name, days_back)
+    # ── Step 2: Resolve each mandi using Cache -> State Batch -> Demo Fallback ──
+    for mandi in ctx.mandis_in_radius:
+        cached = await _get_cached_prices(db, mandi.id, ctx.crop.id, days_back)
+        if cached and len(cached) > 0:
+            latest_fa = max((r.get("fetched_at") for r in cached if r.get("fetched_at")), default=None)
+            hours_old = 999
+            if latest_fa:
+                now_val = datetime.utcnow()
+                fa_val = latest_fa if isinstance(latest_fa, datetime) else now_val
+                hours_old = (now_val - fa_val).total_seconds() / 3600
+
+            if hours_old <= cfg_float("cache.price_freshness_hours", 6.0):
+                ctx.price_data[mandi.id] = PriceDataPacket(
+                    mandi_id=mandi.id, mandi_name=mandi.name,
+                    records=cached, data_tier="LIVE", last_updated=latest_fa,
+                )
+                continue
+
+        # Match from state-wide batch
+        mandi_recs = [
+            r for r in state_records
+            if r["market"].lower().strip() in mandi.name.lower().strip()
+            or mandi.name.lower().strip() in r["market"].lower().strip()
+        ]
+        if mandi_recs:
+            await _upsert_price_records(db, mandi_recs, mandi.id, ctx.crop.id)
+            ctx.price_data[mandi.id] = PriceDataPacket(
+                mandi_id=mandi.id, mandi_name=mandi.name,
+                records=mandi_recs, data_tier="LIVE", last_updated=datetime.utcnow(),
+            )
+        elif cached:
+            ctx.price_data[mandi.id] = PriceDataPacket(
+                mandi_id=mandi.id, mandi_name=mandi.name,
+                records=cached, data_tier="CACHE", last_updated=datetime.utcnow(),
+            )
+        else:
+            # Demo fallback per mandi
+            demo = get_demo_prices_for_mandi_crop(mandi.name, crop_name, days_back)
             for r in demo:
                 if isinstance(r.get("arrival_date"), str):
                     r["arrival_date"] = datetime.strptime(r["arrival_date"], "%d/%m/%Y").date()
             ctx.price_data[mandi.id] = PriceDataPacket(
                 mandi_id=mandi.id, mandi_name=mandi.name,
-                records=demo, data_tier="DEMO",
+                records=demo, data_tier="DEMO", last_updated=datetime.utcnow(),
             )
-        else:
-            ctx.price_data[mandi.id] = result
 
-    # Perform single batch commit for all staged price records
     try:
         await db.commit()
     except Exception as e:

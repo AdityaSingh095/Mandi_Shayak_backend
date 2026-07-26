@@ -124,13 +124,21 @@ async def run_multi_crop_planner(
         if db:
             try:
                 from app.models import Mandi, PriceRecord, CropCanon
-                from app.agents.price_fetch_agent import _fetch_mandi_prices, MandiInfo, _get_cached_prices, _fetch_from_agmarknet, _upsert_price_records
+                from app.agents.price_fetch_agent import MandiInfo, _get_cached_prices, _fetch_from_agmarknet, _upsert_price_records
+                from app.demo_data import get_demo_prices_for_mandi_crop
                 from sqlalchemy import select
-                
+
                 # Resolve crop in CropCanon
                 crop_q = await db.execute(select(CropCanon).where(CropCanon.canonical_name.ilike(f"%{c_name.split()[0]}%")))
                 crop_row = crop_q.scalars().first()
                 canon_id = crop_row.id if crop_row else 1
+
+                # ── Fast State-Level Batch Pre-fetch (1 single HTTP call per crop) ──
+                state_batch = []
+                try:
+                    state_batch = await _fetch_from_agmarknet(state=state, district=None, commodity=c_name, days_back=14)
+                except Exception:
+                    pass
 
                 # Query active mandis in database
                 mandi_q = await db.execute(select(Mandi))
@@ -143,51 +151,27 @@ async def run_multi_crop_planner(
 
                     if m_dist <= max_travel_radius_km:
                         is_interstate = m.state.lower().strip() != state.lower().strip()
-                        
-                        # 1. DB Cache — only use if records exist AND fetched < 6hrs ago
-                        from datetime import datetime as _dt, timezone as _tz
-                        _CACHE_TTL = 6.0
-                        cached = await _get_cached_prices(db, m.id, canon_id, 14)
-                        live_cached = [r for r in cached if r.get("data_tier") != "DEMO"]
-                        cache_fresh = False
-                        if live_cached:
-                            fetched_ats = []
-                            for rc in live_cached:
-                                fa = rc.get("fetched_at")
-                                if fa is None:
-                                    continue
-                                # BUG FIX: normalize tz-awareness before subtraction
-                                if hasattr(fa, 'tzinfo') and fa.tzinfo is None:
-                                    fa = fa.replace(tzinfo=_tz.utc)
-                                fetched_ats.append(fa)
-                            if fetched_ats:
-                                latest_fa = max(fetched_ats)
-                                now_utc = _dt.now(_tz.utc)
-                                age_h = (now_utc - latest_fa).total_seconds() / 3600
-                                cache_fresh = age_h < _CACHE_TTL
 
-                        if cache_fresh and live_cached:
-                            real_price = float(live_cached[-1]["modal_price"])
+                        # 1. Check DB Cache
+                        cached = await _get_cached_prices(db, m.id, canon_id, 14)
+                        real_price = None
+
+                        if cached and len(cached) > 0:
+                            real_price = float(cached[-1]["modal_price"])
                         else:
-                            # 2. Live Agmarknet HTTP API call
-                            try:
-                                api_recs = await _fetch_from_agmarknet(
-                                    state=m.state, district=m.district,
-                                    commodity=c_name, days_back=14
-                                )
-                                if api_recs:
-                                    real_price = float(api_recs[-1]["modal_price"])
-                                    await _upsert_price_records(db, api_recs, m.id, canon_id)
-                                elif live_cached:
-                                    real_price = float(live_cached[-1]["modal_price"])
-                                else:
-                                    # 3. Demo fallback price (no banner needed — just a scalar)
-                                    real_price = 2450.0 if "wheat" in c_name.lower() else (1950.0 if "soybean" in c_name.lower() else 1650.0)
-                            except Exception:
-                                if live_cached:
-                                    real_price = float(live_cached[-1]["modal_price"])
-                                else:
-                                    real_price = 2450.0 if "wheat" in c_name.lower() else (1950.0 if "soybean" in c_name.lower() else 1650.0)
+                            # 2. Match from pre-fetched state batch
+                            matched = [
+                                r for r in state_batch
+                                if r["market"].lower().strip() in m.name.lower().strip()
+                                or m.name.lower().strip() in r["market"].lower().strip()
+                            ]
+                            if matched:
+                                real_price = float(matched[-1]["modal_price"])
+                                await _upsert_price_records(db, matched, m.id, canon_id)
+                            else:
+                                # 3. Distinct demo price fallback per mandi
+                                demo_recs = get_demo_prices_for_mandi_crop(m.name, c_name, 14)
+                                real_price = float(demo_recs[-1]["modal_price"])
 
                         if is_interstate:
                             real_price += 180.0
